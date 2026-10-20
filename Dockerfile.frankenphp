@@ -1,0 +1,65 @@
+# =========================================================
+# STAGE 1: Preparer (Downloads, Extracts & Cleans Moodle 5.3)
+# =========================================================
+FROM alpine:3.20 AS preparer
+
+RUN apk add --no-cache curl tar findutils
+
+WORKDIR /moodle
+
+# Download official Moodle 5.3 LTS (stable503) archive and strip dev/test bloat
+RUN curl -fSL "https://download.moodle.org/download.php/direct/stable503/moodle-latest-503.tgz" -o moodle.tgz \
+  && tar -xzf moodle.tgz --strip-components=1 \
+  && rm moodle.tgz \
+  && find . -type d \( -name "tests" -o -name "behat" -o -name "fixtures" \) -prune -exec rm -rf {} + \
+  && find . -type f \( -name "*.md" -o -name "upgrade.txt" -o -name "thirdpartylibs.xml" -o -name ".gitignore" \) -delete
+
+# =========================================================
+# STAGE 2: FrankenPHP Hardened Runtime (Caddy + PHP 8.3)
+# =========================================================
+FROM dunglas/frankenphp:1-php8.3-alpine
+
+# Install Moodle 5.3 required PHP extensions
+RUN install-php-extensions \
+  exif \
+  gd \
+  intl \
+  mysqli \
+  opcache \
+  pdo_pgsql \
+  soap \
+  sodium \
+  zip
+
+# Apply Moodle 5.3 Production PHP Tuning
+RUN { \
+  echo 'opcache.enable=1'; \
+  echo 'opcache.enable_cli=1'; \
+  echo 'opcache.memory_consumption=128'; \
+  echo 'opcache.interned_strings_buffer=8'; \
+  echo 'opcache.max_accelerated_files=10000'; \
+  echo 'opcache.revalidate_freq=60'; \
+  echo 'max_input_vars=5000'; \
+  echo 'upload_max_filesize=100M'; \
+  echo 'post_max_size=100M'; \
+  echo 'memory_limit=256M'; \
+  } > /usr/local/etc/php/conf.d/moodle-production.ini
+
+# Configure FrankenPHP / Caddy to listen on unprivileged port 8080
+ENV SERVER_NAME=":8080"
+ENV CADDY_GLOBAL_OPTIONS="auto_https off"
+
+WORKDIR /app
+
+# Copy clean Moodle 5.3 from Stage 1 into /app (so /moodle/public becomes /app/public)
+COPY --from=preparer --chown=www-data:www-data /moodle /app
+
+# Set up moodledata, grant Caddy config permissions to www-data, and strip apk
+RUN mkdir -p /var/www/moodledata \
+  && chown -R www-data:www-data /var/www/moodledata /config/caddy /data/caddy \
+  && setcap -r /usr/local/bin/frankenphp \
+  && rm -rf /sbin/apk /etc/apk /lib/apk /usr/share/apk /var/lib/apk /var/cache/apk/*
+
+USER www-data
+
+EXPOSE 8080

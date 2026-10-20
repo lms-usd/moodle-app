@@ -1,0 +1,21 @@
+# Python virtual environments & caches (from benchmarking)
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# Local environment secrets and logs
+.env
+.env.*
+*.log
+
+# Local Moodle runtime artifacts
+moodle.tgz
+moodledata/
+
+# OS & Editor metadata
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp

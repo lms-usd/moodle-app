@@ -1,0 +1,77 @@
+# =========================================================
+# STAGE 1: Preparer (Downloads, Extracts & Cleans Moodle 5.3)
+# =========================================================
+FROM alpine:3.20 AS preparer
+
+RUN apk add --no-cache curl tar findutils
+
+WORKDIR /moodle
+
+# Download official Moodle 5.3 LTS (stable503) archive and strip dev/test bloat
+RUN curl -fSL "https://download.moodle.org/download.php/direct/stable503/moodle-latest-503.tgz" -o moodle.tgz \
+  && tar -xzf moodle.tgz --strip-components=1 \
+  && rm moodle.tgz \
+  && find . -type d \( -name "tests" -o -name "behat" -o -name "fixtures" \) -prune -exec rm -rf {} + \
+  && find . -type f \( -name "*.md" -o -name "upgrade.txt" -o -name "thirdpartylibs.xml" -o -name ".gitignore" \) -delete
+
+# =========================================================
+# STAGE 2: Hardened LOMP Runtime (OpenLiteSpeed + LSPHP 8.3)
+# =========================================================
+FROM litespeedtech/openlitespeed:1.8.2-lsphp83
+
+ENV PATH="/usr/local/lsws/lsphp83/bin:${PATH}"
+
+# Install missing Moodle 5.3 LSPHP extensions
+RUN apt-get update \
+  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+  lsphp83-intl \
+  lsphp83-mysql \
+  lsphp83-opcache \
+  lsphp83-pgsql \
+  lsphp83-curl \
+  && apt-get clean \
+  && rm -rf /var/lib/apt/lists/* /var/cache/apt/* /usr/share/doc/* /usr/share/man/* /tmp/*
+
+# Apply identical Moodle 5.3 PHP production tuning to LSPHP 8.3
+RUN { \
+  echo 'opcache.enable=1'; \
+  echo 'opcache.enable_cli=1'; \
+  echo 'opcache.memory_consumption=128'; \
+  echo 'opcache.interned_strings_buffer=8'; \
+  echo 'opcache.max_accelerated_files=10000'; \
+  echo 'opcache.revalidate_freq=60'; \
+  echo 'max_input_vars=5000'; \
+  echo 'upload_max_filesize=100M'; \
+  echo 'post_max_size=100M'; \
+  echo 'memory_limit=256M'; \
+  } > /usr/local/lsws/lsphp83/etc/php/8.3/mods-available/99-moodle.ini
+
+# 3. Point OpenLiteSpeed's vhost docRoot to Moodle 5.3's /public directory
+#    and tune the existing lsphp processor in-place (works without BuildKit)
+# 3. Point OpenLiteSpeed's vhost docRoot to Moodle 5.3's /public directory
+#    and tune the existing lsphp processor in-place (works without BuildKit)
+RUN sed -i 's|/html|/html/public|g' \
+  /usr/local/lsws/conf/templates/docker.conf \
+  /usr/local/lsws/.conf/templates/docker.conf \
+  && sed -i -E 's/maxConns[[:space:]]+[0-9]+/maxConns                25/g' \
+  /usr/local/lsws/conf/httpd_config.conf \
+  /usr/local/lsws/.conf/httpd_config.conf \
+  /usr/local/lsws/conf/templates/docker.conf \
+  /usr/local/lsws/.conf/templates/docker.conf \
+  && sed -i -E 's/PHP_LSAPI_CHILDREN=[0-9]+/PHP_LSAPI_CHILDREN=25/g' \
+  /usr/local/lsws/conf/httpd_config.conf \
+  /usr/local/lsws/.conf/httpd_config.conf \
+  /usr/local/lsws/conf/templates/docker.conf \
+  /usr/local/lsws/.conf/templates/docker.conf
+
+# Copy clean Moodle 5.3 source into OpenLiteSpeed's default vhost directory
+RUN rm -rf /var/www/vhosts/localhost/html/*
+COPY --from=preparer --chown=nobody:nogroup /moodle /var/www/vhosts/localhost/html
+
+# Create moodledata directory and strip apt package managers
+RUN mkdir -p /var/www/moodledata \
+  && chown -R nobody:nogroup /var/www/moodledata \
+  && chmod -R 755 /var/www/moodledata \
+  && rm -f /usr/bin/apt /usr/bin/apt-get /usr/bin/apt-cache
+
+EXPOSE 80 443
